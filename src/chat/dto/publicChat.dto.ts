@@ -1,4 +1,4 @@
 export class PublicChatDTO {
-  text: string;
+  message: string;
   room_id: string;
 }

@@ -1,49 +1,58 @@
-import { ConnectedSocket, MessageBody, OnGatewayConnection, OnGatewayInit, SubscribeMessage, WebSocketGateway } from '@nestjs/websockets';
+import { ConnectedSocket, MessageBody, OnGatewayConnection, OnGatewayDisconnect, OnGatewayInit, SubscribeMessage, WebSocketGateway, WebSocketServer } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
-import { serverVar, setServer } from 'src/wsServer';
+import { events, serverVar, setServer } from 'src/wsServer';
 import { PublicChatDTO } from './dto/publicChat.dto';
 import { PrivateChatDto } from './dto/privateChat.dto';
+import { ChatService } from './chat.service';
+import { RoomService } from 'src/room/room.service';
+import { UserService } from 'src/user/user.service';
 
 @WebSocketGateway({
   cors: {
     origin: '*',
   },
+  namespace: 'chat',
 })
 export class ChatGateway implements OnGatewayConnection, OnGatewayInit {
-  handleConnection(client: Socket, ...args: any[]) {
-    client.join('lobby');
+  constructor(
+    private readonly chatService: ChatService,
+    private readonly roomService: RoomService,
+    private readonly userService: UserService,
+  ) {}
+
+  @WebSocketServer() wss: Server;
+
+  handleConnection(@ConnectedSocket() client: Socket, ...args: any[]) {
+    let display: string = client.handshake.query.display as string;
+    if (display) {
+      this.userService.addNewClient(client, display);
+      client.on('disconnecting', (x) => {
+        const user = this.userService.getClient(client);
+        this.userService.removeClient(client);
+        this.roomService.leaveAllRooms(client);
+        events.sendInfoToAllClientsOnUserDisconect(Array.from(client.rooms), user);
+      });
+    }
   }
   afterInit(server: Server) {
+    //console.log('server initialized');
     setServer(server);
   }
   @SubscribeMessage('sendPublicChat')
   handlePublicMessage(@ConnectedSocket() client: Socket, @MessageBody() chatText: PublicChatDTO) {
-    //Recibo el texto y lo envio a todos que estan en el canal
-    serverVar.to(chatText.room_id).emit('publicChat', { id: client.id, text: chatText.text });
+    this.chatService.sendMessageToRoom(chatText.room_id, chatText.message, this.userService.getClient(client));
   }
 
   @SubscribeMessage('sendPrivateChat')
   handleMessage(@ConnectedSocket() client: Socket, @MessageBody() chatText: PrivateChatDto) {
-    serverVar.to(chatText.to_id).emit('privateChat', { id: client.id, text: chatText.text });
+    this.wss.to(chatText.to_id).emit('privateChat', { id: client.id, text: chatText.message });
   }
 
-  @SubscribeMessage('joinRoom')
-  joinRoom(@ConnectedSocket() client: Socket, @MessageBody() room_id: string) {
-    if (room_id !== '') {
-      if (!client.rooms.has(room_id)) {
-        client.join(room_id);
-        serverVar.to(room_id).emit('onJoinedRoom', client.id);
-      }
-    }
-  }
+  @SubscribeMessage('getClientListByRoom')
+  getClientListByRoom(@ConnectedSocket() client: Socket, @MessageBody() room_id: string) {}
 
-  @SubscribeMessage('leaveRoom')
-  leaveRoom(@ConnectedSocket() client: Socket, @MessageBody() room_id: string) {
-    if (room_id !== '') {
-      if (client.rooms.has(room_id)) {
-        client.leave(room_id);
-        serverVar.to(room_id).emit('onLeavedRoom', client.id);
-      }
-    }
+  @SubscribeMessage('getMyRooms')
+  getMyRooms(@ConnectedSocket() client: Socket) {
+    this.wss.to(client.id).emit('myRooms', Array.from(client.rooms));
   }
 }
